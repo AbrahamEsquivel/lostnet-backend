@@ -1,0 +1,13 @@
+.git
+.github
+tests
+venv
+.venv
+__pycache__
+*.pyc
+secret.key
+.env
+photos
+*.log
+coverage.xml
+.coverage

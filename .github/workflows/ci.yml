@@ -1,0 +1,201 @@
+# Pipeline CI/CD de la API de LostNet
+# Cubre las 4C: codificación, integración, pruebas y lanzamiento continuos.
+name: CI/CD LostNet API
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------
+  # Análisis estático (Ruff)
+  # ---------------------------------------------------------------
+  analisis-estatico:
+    name: Análisis estático
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Linting con Ruff
+        run: ruff check . --output-format=github
+
+  # ---------------------------------------------------------------
+  # Análisis de vulnerabilidades (pip-audit + Bandit)
+  # ---------------------------------------------------------------
+  vulnerabilidades:
+    name: Análisis de vulnerabilidades
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Dependencias con vulnerabilidades conocidas (pip-audit)
+        run: pip-audit -r requirements.txt
+
+      - name: Código inseguro (Bandit)
+        run: bandit -r . -x ./tests,./venv -ll
+
+  # ---------------------------------------------------------------
+  # Pruebas unitarias (sin bases de datos)
+  # ---------------------------------------------------------------
+  pruebas-unitarias:
+    name: Pruebas unitarias
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Ejecutar pruebas unitarias con cobertura
+        run: pytest tests/unit -v --cov=. --cov-report=term --cov-report=xml
+
+      - name: Guardar reporte de cobertura
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobertura-unitarias
+          path: coverage.xml
+
+  # ---------------------------------------------------------------
+  # Pruebas de integración (MySQL y MongoDB reales como servicios)
+  # ---------------------------------------------------------------
+  pruebas-integracion:
+    name: Pruebas de integración
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: lostnet_db
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptest"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd="mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: test
+      MYSQL_DATABASE: lostnet_db
+      MONGO_URI: mongodb://127.0.0.1:27017/
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Crear esquema de la base de datos
+        run: mysql -h 127.0.0.1 -uroot -ptest < db/schema.sql
+
+      - name: Ejecutar pruebas de integración con cobertura
+        run: pytest tests/integration -v --cov=. --cov-report=term
+
+  # ---------------------------------------------------------------
+  # Empaquetado: imagen Docker publicada en GitHub Container Registry
+  # Se construye en cada ejecución y se publica solo en main.
+  # ---------------------------------------------------------------
+  empaquetado:
+    name: Empaquetado (Docker)
+    needs: [analisis-estatico, vulnerabilidades, pruebas-unitarias, pruebas-integracion]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Nombre de la imagen en minúsculas
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/lostnet-api" >> "$GITHUB_ENV"
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Iniciar sesión en GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construir y publicar imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+  # ---------------------------------------------------------------
+  # Lanzamiento continuo (opcional): despliega en el servidor con un
+  # runner self-hosted instalado en lostnet-api. Se activa creando la
+  # variable de repositorio DEPLOY_ENABLED = true.
+  # ---------------------------------------------------------------
+  despliegue:
+    name: Despliegue en servidor
+    needs: [empaquetado]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: self-hosted
+    steps:
+      - name: Actualizar código en el servidor
+        run: |
+          cd /home/lostnet/lostnet_etl
+          git pull --ff-only
+          venv/bin/pip install -r requirements.txt
+
+      - name: Reiniciar la API
+        run: sudo systemctl restart lostnet-api
+
+      - name: Verificar que la API responde
+        run: |
+          sleep 5
+          curl --fail --silent http://127.0.0.1:5001/api/config

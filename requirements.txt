@@ -1,0 +1,8 @@
+Flask
+flask-cors
+cryptography
+mysql-connector-python
+pymongo
+Pillow
+ImageHash
+gunicorn
