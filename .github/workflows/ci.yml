@@ -185,17 +185,23 @@ jobs:
     needs: [empaquetado]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
     runs-on: self-hosted
+    env:
+      APP_DIR: /home/lostnet/lostnet_etl
     steps:
-      - name: Actualizar código en el servidor
-        run: |
-          cd /home/lostnet/lostnet_etl
-          git pull --ff-only
-          venv/bin/pip install -r requirements.txt
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Copiar código al servidor
+        run: cp api.py image_validator.py migrar_fragmento.py purge_expired_reports.py requirements.txt $APP_DIR/
+
+      - name: Instalar dependencias
+        run: $APP_DIR/venv/bin/pip install -r $APP_DIR/requirements.txt
 
       - name: Reiniciar la API
-        run: sudo systemctl restart lostnet-api
+        run: sudo /usr/bin/systemctl restart lostnet-api
 
       - name: Verificar que la API responde
         run: |
           sleep 5
-          curl --fail --silent http://127.0.0.1:5001/api/config
+          curl --fail --silent --show-error http://127.0.0.1:5001/api/puntos-seguros > /dev/null
+          echo "API desplegada y respondiendo"
